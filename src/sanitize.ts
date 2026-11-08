@@ -51,6 +51,14 @@ const UNTRUSTED_EVENT_FIELDS = ["title", "notes", "location", "url"] as const;
 
 export function markEvent<T extends object>(event: T): T {
   const out = { ...(event as Record<string, unknown>) };
+  if (Array.isArray(out.occurrenceOverrides)) out.occurrenceOverrides = out.occurrenceOverrides.map((o) => markEvent(o as object));
+  if (Array.isArray(out.attendees)) {
+    out.attendees = out.attendees.map((value) => {
+      const attendee = { ...(value as Record<string, unknown>) };
+      if (typeof attendee.name === "string" && attendee.name) attendee.name = markUntrustedText(attendee.name, "attendee.name");
+      return attendee;
+    });
+  }
   for (const f of UNTRUSTED_EVENT_FIELDS) {
     const v = out[f];
     if (typeof v === "string" && v) out[f] = markUntrustedText(v, `event.${f}`);

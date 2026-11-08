@@ -3,6 +3,8 @@ import { CalDavClient } from "../src/caldav/client.js";
 import { Session } from "../src/caldav/discovery.js";
 import { CalDavError } from "../src/errors.js";
 import type { ResolvedConfig } from "../src/config.js";
+import { getProp, getProps, parseICalendar } from "../src/ical/component.js";
+import { parseEventDocument } from "../src/ical/event.js";
 import { handleCreate, handleDelete, handleEvents, handleGet, handleList, handleUpdate, type Context } from "../src/tools/handlers.js";
 import { FakeICloud } from "./helpers/fake-icloud.js";
 
@@ -12,6 +14,7 @@ function makeCtx(fake: FakeICloud, overrides: Partial<ResolvedConfig> = {}): Con
   const config: ResolvedConfig = {
     appleId: fake.username,
     appPassword: fake.password,
+    organizerEmail: fake.username,
     timezone: TZ,
     serverUrl: "https://caldav.icloud.com",
     calendars: [],
@@ -131,6 +134,190 @@ describe("handlers against fake iCloud", () => {
     expect(listed.events.map((e) => e.title)).toEqual(["Early Aug 2027", "Offsite"]);
     const off = listed.events.find((e) => e.title === "Offsite")!;
     expect(off.nextOccurrences).toEqual(["2027-09-01"]);
+  });
+
+  it("creates external attendees and reconciles attendee changes idempotently", async () => {
+    const res = await handleCreate(ctx, {
+      title: "School pickup",
+      start: "2026-08-20T15:00",
+      duration: 30,
+      calendar: "Home",
+      attendees: [{ email: "parent@work.example", name: "Parent" }],
+    } as never);
+    expect(res.event.attendees).toEqual([expect.objectContaining({ email: "parent@work.example", name: "Parent" })]);
+
+    const storedUrl = `${fake.partition}/1234/calendars/home/${res.event.uid}.ics`;
+    let stored = fake.objects.get(storedUrl)!.ics;
+    expect(stored).toContain("ORGANIZER:mailto:user@icloud.com");
+    const attendee = getProps(parseEventDocument(stored).master, "ATTENDEE")[0];
+    expect(attendee).toMatchObject({ value: "mailto:parent@work.example", params: { CN: "Parent", PARTSTAT: "NEEDS-ACTION", RSVP: "TRUE" } });
+
+    const first = await handleUpdate(ctx, {
+      uid: res.event.uid,
+      addAttendees: [{ email: "second@work.example" }],
+    } as never);
+    expect(first.event.attendees?.map((a) => a.email)).toEqual(["parent@work.example", "second@work.example"]);
+    const putCount = fake.log.filter((l) => l.method === "PUT").length;
+
+    await handleUpdate(ctx, { uid: res.event.uid, addAttendees: [{ email: "second@work.example" }] } as never);
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(putCount);
+
+    const reassigned = await handleUpdate(ctx, {
+      uid: res.event.uid,
+      addAttendees: [{ email: "newparent@work.example" }],
+      removeAttendees: ["parent@work.example"],
+    } as never);
+    expect(reassigned.event.attendees?.map((a) => a.email)).toEqual(["second@work.example", "newparent@work.example"]);
+    stored = fake.objects.get(storedUrl)!.ics;
+    expect(stored).not.toContain("mailto:parent@work.example");
+    expect(stored).toContain("mailto:newparent@work.example");
+  });
+
+  it("rejects invalid invitees and refuses to edit another organizer's invitees", async () => {
+    const puts = fake.log.filter((l) => l.method === "PUT").length;
+    await expect(handleCreate(ctx, {
+      title: "Bad invite",
+      start: "2026-08-20T15:00",
+      calendar: "Home",
+      attendees: [{ email: "not an email" }],
+    } as never)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(puts);
+
+    const foreign = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Apple//EN", "BEGIN:VEVENT",
+      "UID:UID-FOREIGN-INVITE", "SUMMARY:External event", "DTSTART:20260820T220000Z", "DTEND:20260820T230000Z",
+      "ORGANIZER:mailto:someone-else@icloud.com", "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:parent@work.example", "END:VEVENT", "END:VCALENDAR", "",
+    ].join("\r\n");
+    fake.seed("/1234/calendars/home/", "foreign.ics", foreign);
+    await expect(handleUpdate(ctx, { uid: "UID-FOREIGN-INVITE", removeAttendees: ["parent@work.example"] } as never)).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  it("edits and cancels one recurring occurrence across a daylight-saving boundary", async () => {
+    ctx = makeCtx(fake, { timezone: "Australia/Sydney" });
+    const recurring = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//Apple//EN",
+      "BEGIN:VEVENT",
+      "UID:UID-SCHOOL-RUN",
+      "SUMMARY:School pickup",
+      "DTSTART;TZID=Australia/Sydney:20261002T090000",
+      "DTEND;TZID=Australia/Sydney:20261002T093000",
+      "ORGANIZER:mailto:user@icloud.com",
+      "RRULE:FREQ=WEEKLY;BYDAY=FR",
+      "END:VEVENT",
+      "END:VCALENDAR",
+      "",
+    ].join("\r\n");
+    const url = fake.seed("/1234/calendars/home/", "school-run.ics", recurring);
+    await handleUpdate(ctx, { uid: "UID-SCHOOL-RUN", addAttendees: [{ email: "parent@work.example" }] } as never);
+
+    const putsBeforeNoOp = fake.log.filter((l) => l.method === "PUT").length;
+    await handleUpdate(ctx, {
+      uid: "UID-SCHOOL-RUN",
+      occurrenceStart: "2026-10-09T09:00",
+      addAttendees: [{ email: "PARENT@work.example" }],
+    } as never);
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(putsBeforeNoOp);
+    expect(parseEventDocument(fake.objects.get(url)!.ics).overrides).toHaveLength(0);
+
+    const moved = await handleUpdate(ctx, {
+      uid: "UID-SCHOOL-RUN",
+      occurrenceStart: "2026-10-09T09:00",
+      start: "2026-10-09T10:00",
+      duration: 30,
+    } as never);
+    expect(moved.event.start).toBe("2026-10-02T09:00:00+10:00"); // master remains unchanged
+    expect(moved.occurrence?.start).toBe("2026-10-09T10:00:00+11:00");
+    let parsed = parseEventDocument(fake.objects.get(url)!.ics);
+    expect(getProp(parsed.master, "DTSTART")?.value).toBe("20261002T090000");
+    expect(getProp(parsed.master, "RRULE")?.value).toBe("FREQ=WEEKLY;BYDAY=FR");
+    expect(parsed.overrides).toHaveLength(1);
+    expect(getProp(parsed.overrides[0], "RECURRENCE-ID")?.value).toBe("20261009T090000");
+    expect(getProp(parsed.overrides[0], "RECURRENCE-ID")?.params.TZID).toBe("Australia/Sydney");
+    expect(getProp(parsed.overrides[0], "DTSTART")?.value).toBe("20261008T230000Z");
+    const movedList = await handleEvents(ctx, { from: "2026-10-08", to: "2026-10-10", calendar: "Home" });
+    expect(movedList.events[0].nextOccurrences).toEqual(["2026-10-09T10:00:00+11:00"]);
+    expect(movedList.events[0].occurrenceOverrides?.[0]).toMatchObject({
+      recurrenceStart: "2026-10-09T09:00:00+11:00",
+      start: "2026-10-09T10:00:00+11:00",
+      cancelled: false,
+    });
+
+    await handleDelete(ctx, { uid: "UID-SCHOOL-RUN", occurrenceStart: "2026-10-09T09:00" } as never);
+    parsed = parseEventDocument(fake.objects.get(url)!.ics);
+    expect(fake.objects.has(url)).toBe(true);
+    expect(getProp(parsed.master, "RRULE")?.value).toBe("FREQ=WEEKLY;BYDAY=FR");
+    expect(getProp(parsed.overrides[0], "STATUS")?.value).toBe("CANCELLED");
+    expect(getProps(parsed.overrides[0], "ATTENDEE").map((a) => a.value)).toEqual(["mailto:parent@work.example"]);
+    const cancelledList = await handleEvents(ctx, { from: "2026-10-08", to: "2026-10-10", calendar: "Home" });
+    expect(cancelledList.events[0].nextOccurrences).toEqual([]);
+    expect(cancelledList.events[0].occurrenceOverrides?.[0].cancelled).toBe(true);
+    const puts = fake.log.filter((l) => l.method === "PUT").length;
+    await handleDelete(ctx, { uid: "UID-SCHOOL-RUN", occurrenceStart: "2026-10-09T09:00" } as never);
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(puts);
+  });
+
+  it("rejects a date that is not an instance in the recurrence", async () => {
+    const recurring = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Apple//EN", "BEGIN:VEVENT",
+      "UID:UID-WEEKLY", "SUMMARY:School drop-off", "DTSTART;TZID=America/Los_Angeles:20260818T080000",
+      "DTEND;TZID=America/Los_Angeles:20260818T083000", "RRULE:FREQ=WEEKLY;BYDAY=TU", "END:VEVENT", "END:VCALENDAR", "",
+    ].join("\r\n");
+    fake.seed("/1234/calendars/home/", "weekly.ics", recurring);
+    const puts = fake.log.filter((l) => l.method === "PUT").length;
+    await expect(handleUpdate(ctx, { uid: "UID-WEEKLY", occurrenceStart: "2026-08-19T08:00", title: "Wrong day" } as never)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(puts);
+  });
+
+  it("materializes correct dates for a title-only exception and a new cancellation", async () => {
+    const recurring = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Apple//EN", "BEGIN:VEVENT",
+      "UID:UID-EXCEPTION", "SUMMARY:School pickup", "DTSTART;TZID=America/Los_Angeles:20260818T080000",
+      "DTEND;TZID=America/Los_Angeles:20260818T083000", "RRULE:FREQ=WEEKLY;BYDAY=TU", "END:VEVENT", "END:VCALENDAR", "",
+    ].join("\r\n");
+    const url = fake.seed("/1234/calendars/home/", "exception.ics", recurring);
+    await handleUpdate(ctx, { uid: "UID-EXCEPTION", occurrenceStart: "2026-08-25T08:00", title: "Alternate pickup" } as never);
+    let parsed = parseEventDocument(fake.objects.get(url)!.ics);
+    expect(getProp(parsed.overrides[0], "DTSTART")?.value).toBe("20260825T080000");
+    expect(getProp(parsed.overrides[0], "DTEND")?.value).toBe("20260825T083000");
+    expect(getProp(parsed.overrides[0], "DTSTART")?.params.TZID).toBe("America/Los_Angeles");
+
+    await handleDelete(ctx, { uid: "UID-EXCEPTION", occurrenceStart: "2026-09-01T08:00" });
+    parsed = parseEventDocument(fake.objects.get(url)!.ics);
+    const cancelled = parsed.overrides.find((o) => getProp(o, "STATUS")?.value === "CANCELLED");
+    expect(getProp(cancelled!, "DTSTART")?.value).toBe("20260901T080000");
+    expect(getProp(cancelled!, "DTEND")?.value).toBe("20260901T083000");
+    expect(getProp(cancelled!, "DTSTART")?.params.TZID).toBe("America/Los_Angeles");
+  });
+
+  it("does not accept biweekly occurrences in an intervening Monday-based week", async () => {
+    ctx = makeCtx(fake, { timezone: "Australia/Sydney" });
+    const recurring = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Apple//EN", "BEGIN:VEVENT",
+      "UID:UID-BIWEEKLY", "SUMMARY:School drop-off", "DTSTART;TZID=Australia/Sydney:20261004T090000",
+      "DTEND;TZID=Australia/Sydney:20261004T093000", "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", "END:VEVENT", "END:VCALENDAR", "",
+    ].join("\r\n");
+    const url = fake.seed("/1234/calendars/home/", "biweekly.ics", recurring);
+    const putsBefore = fake.log.filter((l) => l.method === "PUT").length;
+    await expect(handleUpdate(ctx, { uid: "UID-BIWEEKLY", occurrenceStart: "2026-10-05T09:00", title: "Wrong week" } as never)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(putsBefore);
+
+    await handleUpdate(ctx, { uid: "UID-BIWEEKLY", occurrenceStart: "2026-10-12T09:00", title: "Correct week" } as never);
+    expect(parseEventDocument(fake.objects.get(url)!.ics).overrides).toHaveLength(1);
+  });
+
+  it("refuses invite changes when the existing event has no organizer identity", async () => {
+    const noOrganizer = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Apple//EN", "BEGIN:VEVENT",
+      "UID:UID-NO-ORGANIZER", "SUMMARY:Family event", "DTSTART:20260820T160000Z", "DTEND:20260820T170000Z",
+      "END:VEVENT", "END:VCALENDAR", "",
+    ].join("\r\n");
+    const url = fake.seed("/1234/calendars/home/", "no-organizer.ics", noOrganizer);
+    const putsBefore = fake.log.filter((l) => l.method === "PUT").length;
+    await expect(handleUpdate(ctx, { uid: "UID-NO-ORGANIZER", addAttendees: [{ email: "parent@work.example" }] } as never)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fake.log.filter((l) => l.method === "PUT")).toHaveLength(putsBefore);
+    expect(getProp(parseEventDocument(fake.objects.get(url)!.ics).master, "ORGANIZER")).toBeUndefined();
   });
 
   it("tolerates null for unused optional params (model habit)", async () => {

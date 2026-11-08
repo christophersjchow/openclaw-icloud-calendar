@@ -25,7 +25,7 @@ const actionHandlers = {
 function toolsFor() {
   const tools = new Map<string, Tool>();
   (plugin as unknown as { register: (api: unknown) => void }).register({
-    pluginConfig: { appleId: "fixture@example.invalid", appPassword: "fixture", timezone: "UTC" },
+    pluginConfig: { appleId: "fixture@example.invalid", appPassword: "fixture", timezone: "UTC", readOnly: false },
     logger: { info() {}, warn() {} }, registerTool: (tool: Tool) => tools.set(tool.name, tool),
   });
   return tools;

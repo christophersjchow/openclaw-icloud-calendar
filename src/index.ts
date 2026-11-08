@@ -54,7 +54,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
     // are held only in this closure.
     let ctx: Context | null = null;
     let configError: string | null = null;
-    let readOnlyFromConfig = raw?.readOnly === true;
+    let readOnlyFromConfig = raw?.readOnly !== false;
 
     async function getContext(): Promise<Context> {
       if (ctx) return ctx;
@@ -129,7 +129,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         name: "icloud_calendar_create",
         label: "iCloud Calendar Create",
         description:
-          "Create an event in an iCloud calendar. Requires title, start, and calendar (id or name). Provide end or duration (minutes); defaults to 1 hour (timed) or one day (all-day). Optional location, notes, url, alarms (minutes before), recurrence. Returns the stored event and a verification block comparing requested vs stored times.",
+          "Create an event in an iCloud calendar. Requires title, start, and calendar (id or name). Provide end or duration (minutes); defaults to 1 hour (timed) or one day (all-day). Optional location, notes, url, alarms (minutes before), recurrence, and attendees to invite by email. Invitations are sent by iCloud when its CalDAV scheduling service accepts the event. Returns the stored event and a verification block comparing requested vs stored times.",
         parameters: createSchema,
         async execute(_id: string, params: Record<string, unknown>) {
           try {
@@ -146,13 +146,13 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         name: "icloud_calendar_update",
         label: "iCloud Calendar Update",
         description:
-          "Update fields of an existing iCloud calendar event by uid. Only supplied fields change. Empty string clears location/notes/url; empty alarms array removes alarms; clearRecurrence=true makes a recurring event one-off. Recurring events are updated as a whole series.",
+          "Update fields of an existing iCloud calendar event by uid. Only supplied fields change. Empty string clears location/notes/url; empty alarms array removes alarms; clearRecurrence=true makes a recurring event one-off. Omit occurrenceStart to update the full series; set it to the original start of one recurring instance to update just that instance. addAttendees and removeAttendees change invitees without replacing other attendees.",
         parameters: updateSchema,
         async execute(_id: string, params: Record<string, unknown>) {
           try {
             const c = await getContext();
             const res = await handleUpdate(c, params as UpdateParams);
-            return ok({ success: true, event: markEvent(res.event), ...(res.verification ? { verification: res.verification } : {}) }, { action: "update", uid: res.event.uid });
+            return ok({ success: true, event: markEvent(res.event), ...(res.occurrence ? { occurrence: markEvent(res.occurrence) } : {}), ...(res.verification ? { verification: res.verification } : {}) }, { action: "update", uid: res.event.uid });
           } catch (e) {
             return fail(e, "update");
           }
@@ -162,7 +162,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       api.registerTool({
         name: "icloud_calendar_delete",
         label: "iCloud Calendar Delete",
-        description: "Delete an iCloud calendar event by uid. For recurring events this deletes the entire series. Confirm with the user before calling.",
+        description: "Delete an iCloud calendar event by uid. Omit occurrenceStart to delete the whole event or series. For a single recurrence, provide its original start in the configured timezone to cancel only that occurrence. Confirm destructive changes with the user before calling.",
         parameters: deleteSchema,
         async execute(_id: string, params: Record<string, unknown>) {
           try {

@@ -1,17 +1,17 @@
-# openclaw-icloud-calendar: design
+# openclaw-icloud-calendar fork: design
 
 Date: 2026-08-16
 
 ## Goal
 
-An OpenClaw plugin that reads and writes Apple iCloud Calendar server-to-server over CalDAV, authenticated with an Apple Account email and an app-specific password. Runs on any host with Node 22 (Linux gateway included); no macOS, no EventKit, no local device.
+An OpenClaw plugin fork that reads and writes Apple iCloud Calendar server-to-server over CalDAV, authenticated with an Apple Account email and an app-specific password. It adds external email invitations and per-occurrence recurring-event changes while retaining the upstream plugin's constrained interface.
 
-Public plugin, single account per install, calendar CRUD only in v1.
+Single account per install. The fork is built into the family OpenClaw image at a pinned Git commit; it is not published under the upstream ClawHub package.
 
-## Non-goals (v1)
+## Non-goals
 
-- Reminders (VTODO), Contacts (CardDAV), free/busy, attendees/invitations
-- Per-instance edits of recurring events (whole-series only)
+- Reminders (VTODO), Contacts (CardDAV), free/busy
+- Two-parent approvals, automated family planning, delivery retries/monitoring
 - Multi-account per agent
 - CLI or MCP surface (OpenClaw plugin only)
 
@@ -53,11 +53,11 @@ Data flow (write): JSON -> event.ts -> ICS -> PUT (`If-None-Match: *` on create,
 | `icloud_calendar_list` | none | `[{id, name, color, readOnly, ctag}]`; `id` = last path segment of the calendar href |
 | `icloud_calendar_events` | `from`, `to` (default now..+7d), `calendar?`, `limit?` (200) | Merged across calendars, sorted by start. Recurring masters include `recurrence` and `nextOccurrences` (best-effort, cap 50) |
 | `icloud_calendar_get` | `uid`, `calendar?` | Searches all calendars if not given |
-| `icloud_calendar_create` | `title`, `start`, `end?`/`duration?`, `calendar` (required), `allDay?`, `location?`, `notes?`, `url?`, `alarms?`, `recurrence?` | New UID via `crypto.randomUUID()` |
-| `icloud_calendar_update` | `uid`, `calendar?`, subset of create fields | Patch only supplied fields; 412 -> one refetch+retry |
-| `icloud_calendar_delete` | `uid`, `calendar?` | `If-Match`; returns `{deleted:true, uid}` |
+| `icloud_calendar_create` | `title`, `start`, `end?`/`duration?`, `calendar`, `attendees?`, event fields | New UID; attendee properties use configured organizer identity |
+| `icloud_calendar_update` | `uid`, `calendar?`, event fields, `addAttendees?`, `removeAttendees?`, `occurrenceStart?` | Patch series or one validated recurrence instance; 412 -> one refetch+retry |
+| `icloud_calendar_delete` | `uid`, `calendar?`, `occurrenceStart?` | Delete series, or write a cancelled `RECURRENCE-ID` override for one instance |
 
-Event JSON: `{ uid, calendarId, calendar, title, start, end, allDay, timezone, location?, notes?, url?, status?, recurrence?, alarms?, etag, lastModified?, readOnly }`.
+Event JSON includes `{ uid, calendarId, calendar, title, start, end, allDay, timezone, location?, notes?, url?, status?, attendees?, recurrence?, nextOccurrences?, occurrenceOverrides?, alarms?, etag, lastModified?, readOnly }`.
 
 Times: ISO 8601 with offset in the configured `timezone`; all-day as `YYYY-MM-DD`. Naive inputs are interpreted in `timezone`. Written as UTC (`Z`) except all-day (`VALUE=DATE`).
 
@@ -67,19 +67,22 @@ Times: ISO 8601 with offset in the configured `timezone`; all-day as `YYYY-MM-DD
 |---|---|---|
 | `appleId` | string, required | Apple Account email |
 | `appPassword` | string / `${ENV}` / SecretRef, required | `uiHints.sensitive` |
+| `organizerEmail` | string | Defaults to `appleId`; should identify the owner/organizer of events being invited |
 | `timezone` | IANA string, default host tz | validated with Intl |
 | `serverUrl` | string, default `https://caldav.icloud.com` | must be https unless localhost |
 | `calendars` | string[] | allowlist by id or name; empty = all |
 | `readOnly` | boolean, default false | write tools are not registered |
 
-Env fallbacks: `ICLOUD_APPLE_ID`, `ICLOUD_APP_PASSWORD`.
+Env fallbacks: `ICLOUD_APPLE_ID`, `ICLOUD_APP_PASSWORD`, `ICLOUD_ORGANIZER_EMAIL`.
 
 ## Security
 
 - Basic auth over TLS only.
 - Secret resolved once in `register()`, held in closure; never in results, logs, or errors.
 - Destructive tools require exact `uid`; no bulk ops.
-- All server-sourced free text is datamarked; suspicious instruction-like text is flagged.
+- Single-occurrence changes require an exact original recurrence start and a supported RRULE match.
+- Attendee edits are allowed only on events organized by the configured account. Work calendar APIs are not used.
+- All server-sourced free text, including attendee names, is datamarked; suspicious instruction-like text is flagged.
 - `contracts.tools` lists every tool.
 
 ## Errors
@@ -89,5 +92,4 @@ Env fallbacks: `ICLOUD_APPLE_ID`, `ICLOUD_APP_PASSWORD`.
 ## Testing
 
 - vitest unit tests: iCal round-trips (all-day, UTC, TZID, floating, RRULE, EXDATE, VALARM, folding, escaping), XML parser on captured multistatus fixtures, tz DST boundaries, client with injected fetch mock (headers, Depth, If-Match, 401/412/404/redirect).
-- Integration (opt-in via `ICLOUD_INTEGRATION=1`, `ICLOUD_TEST_APPLE_ID`, `ICLOUD_TEST_APP_PASSWORD`, `ICLOUD_TEST_CALENDAR`): create/get/update/delete a `[openclaw-test]` event.
-- `plugin-inspector` + `/openclaw-plugin-audit` before ClawHub publish.
+- Integration (opt-in via `ICLOUD_INTEGRATION=1`, `ICLOUD_TEST_APPLE_ID`, `ICLOUD_TEST_APP_PASSWORD`, `ICLOUD_TEST_CALENDAR`): use a separate test calendar and controlled mailbox to verify invite, update, reassignment/cancellation, and recurring-exception delivery. Mock tests cannot establish that iCloud sent invitation email.

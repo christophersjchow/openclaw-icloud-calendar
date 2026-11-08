@@ -1,8 +1,8 @@
 # openclaw-icloud-calendar
 
-OpenClaw plugin that reads and writes **Apple iCloud Calendar** directly over CalDAV, using an
-Apple ID and an app-specific password. Server-to-server: it runs wherever your OpenClaw gateway
-runs (Linux, a Raspberry Pi, a VPS). No macOS, no EventKit, no phone in the loop.
+OpenClaw plugin fork that reads and writes **Apple iCloud Calendar** directly over CalDAV, using an
+Apple ID and an app-specific password. It adds email invitations and safe single-occurrence edits
+to recurring events while preserving the upstream plugin's constrained tool interface.
 
 Zero runtime dependencies for the CalDAV path: `fetch` plus a small XML/iCalendar layer written
 for exactly the responses iCloud sends.
@@ -14,19 +14,22 @@ for exactly the responses iCloud sends.
 | `icloud_calendar_list` | Calendars available to the account (id, name, color, readOnly) |
 | `icloud_calendar_events` | Events in a range (default next 7 days), one calendar or all, sorted |
 | `icloud_calendar_get` | One event by UID |
-| `icloud_calendar_create` | New event (title, start, calendar; end/duration, location, notes, url, alarms, recurrence) |
-| `icloud_calendar_update` | Change fields on an event by UID (etag-protected) |
-| `icloud_calendar_delete` | Delete an event by UID (whole series for recurring events) |
+| `icloud_calendar_create` | New event, optionally inviting email attendees |
+| `icloud_calendar_update` | Change event fields or add/remove attendees; optionally target one recurring occurrence |
+| `icloud_calendar_delete` | Delete an event/series or cancel one recurring occurrence |
 
 Set `readOnly: true` and the three write tools are not registered at all.
 
 ## Install
 
-```bash
-openclaw plugins install clawhub:openclaw-icloud-calendar
-```
+This fork is built into the family OpenClaw image from a pinned Git commit. It is not published to
+ClawHub or npm, so the upstream ClawHub package will not include the invitation or occurrence
+changes. For a separate test Gateway, install a reviewed immutable fork revision with OpenClaw's
+Git source:
 
-(It ships on ClawHub only; keep the `clawhub:` prefix. The bare name would resolve to npm, where it is not published.)
+```bash
+openclaw plugins install git:github.com/christophersjchow/openclaw-icloud-calendar@<commit-sha> --force
+```
 
 ## Setup
 
@@ -46,8 +49,11 @@ openclaw plugins install clawhub:openclaw-icloud-calendar
            "enabled": true,
            "config": {
              "appleId": "you@icloud.com",
+             "organizerEmail": "you@icloud.com",
              "appPassword": "${ICLOUD_APP_PASSWORD}",
-             "timezone": "America/Los_Angeles"
+            "timezone": "Australia/Sydney",
+            "calendars": ["Family"],
+            "readOnly": true
            }
          }
        }
@@ -60,7 +66,8 @@ openclaw plugins install clawhub:openclaw-icloud-calendar
    `~/.openclaw/secrets.json`). Plain strings work but are discouraged.
 
    Without any config, the plugin falls back to `ICLOUD_APPLE_ID` and `ICLOUD_APP_PASSWORD`
-   environment variables.
+   environment variables. `ICLOUD_ORGANIZER_EMAIL` can override the organizer address; otherwise
+   it defaults to the Apple ID.
 
 ## Configuration
 
@@ -68,21 +75,37 @@ openclaw plugins install clawhub:openclaw-icloud-calendar
 |-----|------|---------|-------|
 | `appleId` | string | | Apple Account email. Required. |
 | `appPassword` | string / `${ENV}` / SecretRef | | App-specific password. Required. Never your Apple Account password. |
+| `organizerEmail` | string | `appleId` | Calendar owner address used as the invitation organizer. |
 | `timezone` | IANA string | host time zone | Used to interpret naive times the agent sends and to format results. |
 | `serverUrl` | string | `https://caldav.icloud.com` | Must be `https`. Any CalDAV server that speaks the same dialect should work, but iCloud is what is tested. |
 | `calendars` | string[] | all | Allowlist of calendar ids or names the agent may see and modify. |
-| `readOnly` | boolean | `false` | Do not register create/update/delete. |
+| `readOnly` | boolean | `true` | Do not register create/update/delete. Set false only after verifying invitation delivery against a separate test calendar. |
 
 ## Behavior worth knowing
 
 - **Times.** Results are ISO 8601 with an offset in `timezone`; all-day events use `YYYY-MM-DD`
   with an inclusive `end`. Inputs may be naive local (`2026-08-20T09:00`), `Z`, or offset times.
   Timed events are written to iCloud in UTC; all-day events as `VALUE=DATE`.
-- **Recurring events.** Queries return the series master with `recurrence` and a best-effort
-  `nextOccurrences` list within the queried range (daily/weekly/monthly/yearly with the common
-  BYDAY/BYMONTHDAY forms). Exotic rules are passed through in `recurrence.raw`. Updates and deletes
-  apply to the whole series. Per-instance overrides made elsewhere are preserved on update and
-  reported as `overrideCount`.
+- **Invitations.** Create accepts `attendees: [{email, name?}]`. Update accepts `addAttendees` and
+  `removeAttendees` so unrelated invitees are preserved. The configured Apple account is written as
+  `ORGANIZER`; invitees are written as `ATTENDEE` properties with `RSVP=TRUE` and
+  `PARTSTAT=NEEDS-ACTION`. A changed event is PUT to CalDAV and the iCloud scheduling service is
+  expected to send or update standard calendar email invitations. Apple/iCloud delivery is not
+  proven by the mock tests; complete the manual test below with a separate iCloud test calendar
+  before enabling writes in a live family calendar. The payload follows [iCalendar RFC 5545](https://www.rfc-editor.org/rfc/rfc5545.html)
+  and the server-side delivery expectation follows [CalDAV Scheduling RFC 6638](https://www.rfc-editor.org/rfc/rfc6638.html);
+  neither standard confirms Apple's production behavior. Work calendar APIs are not used, and
+  recipients must accept invitations according to their email/calendar client.
+- **Recurring events.** Queries return the series master with `recurrence`, `nextOccurrences`, and
+  details for existing `occurrenceOverrides`; moved and cancelled instances are reflected in
+  upcoming occurrences. Update/delete accept `occurrenceStart` to target an original instance start.
+  The plugin validates that it belongs to a supported RRULE, then writes a `RECURRENCE-ID` override;
+  deleting one writes a `STATUS:CANCELLED` override. Omit `occurrenceStart` only when intending to
+  modify the whole series. Unknown recurrence rules and RDATE-only instances are rejected for
+  per-instance edits rather than guessed.
+- **Idempotency.** Re-adding an existing attendee or cancelling an already-cancelled instance does
+  not write the calendar object again. No-op event updates are also skipped so the server does not
+  send redundant invitation updates.
 - **Concurrency.** Updates and deletes send `If-Match` with the etag from the last read. On a 412 the
   plugin re-reads once and retries; a second conflict returns `conflict`.
 - **Verification.** `create` and time-changing `update` return a `verification` block comparing what
@@ -94,7 +117,7 @@ openclaw plugins install clawhub:openclaw-icloud-calendar
 - **UID lookup.** iCloud answers `calendar-query` UID prop-filters with a bare 412, so lookups try
   `GET <calendar>/<uid>.ics` first (how Apple clients and this plugin name objects) and fall back to
   scanning the calendar. Pass `calendar` to update/get/delete when you know it; it avoids the scan.
-- **Untrusted content.** Titles, notes, locations and URLs are wrapped in per-session
+- **Untrusted content.** Titles, notes, locations, URLs and attendee names are wrapped in per-session
   `[UNTRUSTED_CALENDAR_DATA_…]` markers and instruction-like text is flagged, so the agent does not
   treat invitation text as commands.
 - **Errors.** Tool results carry `error.code`: `auth_failed`, `not_found`, `conflict`,
@@ -128,10 +151,33 @@ ICLOUD_TEST_CALENDAR=Home npm run test:integration
 
 Design notes live in `docs/superpowers/specs/`.
 
-## Not in v1
+## Manual invitation test (required before production writes)
 
-Reminders (VTODO), Contacts (CardDAV), attendees/invitations, free-busy, per-instance edits of
-recurring events, multiple accounts.
+Use a separate iCloud test calendar and a mailbox you control, not a work calendar integration:
+
+1. Configure a dedicated Apple app-specific password, organizer email and test-calendar allowlist
+   on a disposable Gateway. Both the default and production Gateway are read-only. Set `readOnly: false` only in the disposable test Gateway with the test-calendar allowlist configured.
+2. Create a one-off event with a test mailbox as attendee. Confirm an invitation arrives and the
+   event appears in that mailbox's calendar after acceptance.
+3. Move the event and confirm the invitee receives one update. Repeat the exact same attendee add
+   and confirm there is no second update.
+4. Add a second test attendee and remove the first. Confirm the new invitation and cancellation
+   reach the correct mailboxes, and the first attendee no longer receives updates.
+5. Create a weekly test series spanning a daylight-saving transition. Move one occurrence, verify
+   the master and other dates are unchanged, then cancel that one occurrence and verify its
+   cancellation reaches the invitee.
+6. Restart the test Gateway and confirm the event/override results are still read from iCloud.
+
+The fake CalDAV tests validate the iCalendar payload and conditional writes; they cannot prove that
+iCloud sends mail or that an external provider accepts it. If iCloud does not deliver requests and
+cancellations in this test, do not enable write tools in the family deployment.
+
+## Current limitations
+
+Reminders (VTODO), Contacts (CardDAV), free-busy, multiple accounts, a two-parent approval workflow,
+weekly planning automation, and a transactional retry queue for invitation delivery. iCloud
+invitation delivery, attendee acceptance, and responses depend on Apple's service and invitee email
+provider; the plugin only verifies the calendar object returned by CalDAV.
 
 ## License
 

@@ -7,7 +7,7 @@ import type { ResolvedConfig } from "../config.js";
 import type { CalendarInfo, Session } from "../caldav/discovery.js";
 import { getObject, queryByUid, queryEventsInRange, type CalendarObject } from "../caldav/query.js";
 import { CalDavError, invalidInput, notFound } from "../errors.js";
-import { buildNewEvent, componentToEvent, parseEventDocument, patchEvent, resolveTimes, type Event, type EventInput } from "../ical/event.js";
+import { buildNewEvent, calendarDataChanged, cancelOccurrence, componentToEvent, parseEventDocument, patchEvent, patchOccurrence, resolveTimes, type Event, type EventInput } from "../ical/event.js";
 import type { Recurrence } from "../ical/rrule.js";
 import { formatDateOnly, formatIsoInZone, parseInput, zonedToUtc } from "../ical/tz.js";
 
@@ -17,9 +17,15 @@ function stripNulls<T extends object>(o: T): T {
 }
 
 type Nullable<T> = { [K in keyof T]: T[K] | null };
+type AttendeeWireInput = { email: string; name?: string | null };
 
 /** Wire shape of writable event fields: every optional field may be null. */
-export type WireEventInput = Partial<Nullable<Omit<EventInput, "recurrence">>> & { recurrence?: Partial<Nullable<Recurrence>> | null };
+export type WireEventInput = Partial<Nullable<Omit<EventInput, "recurrence" | "attendees" | "addAttendees" | "removeAttendees">>> & {
+  recurrence?: Partial<Nullable<Recurrence>> | null;
+  attendees?: AttendeeWireInput[] | null;
+  addAttendees?: AttendeeWireInput[] | null;
+  removeAttendees?: (string | null)[] | null;
+};
 
 /**
  * Normalise wire input into EventInput. For clearable fields (location, notes,
@@ -34,7 +40,9 @@ function normaliseInput(raw: WireEventInput, keepClears: boolean): EventInput {
       if (keepClears && ["location", "notes", "url", "alarms", "recurrence"].includes(k)) out[k] = null;
       continue;
     }
-    out[k] = k === "recurrence" ? stripNulls(v as object) : v;
+    if (k === "attendees" || k === "addAttendees") out[k] = (v as AttendeeWireInput[]).map((a) => stripNulls(a));
+    else if (k === "removeAttendees") out[k] = (v as (string | null)[]).filter((a): a is string => typeof a === "string");
+    else out[k] = k === "recurrence" ? stripNulls(v as object) : v;
   }
   return out as EventInput;
 }
@@ -235,7 +243,7 @@ export async function handleCreate(ctx: Context, rawParams: CreateParams): Promi
   const cal = await resolveAllowedCalendar(ctx, calendar);
   assertWritable(ctx, cal);
   const uid = randomUUID().toUpperCase();
-  const { ics } = buildNewEvent(params, ctx.config.timezone, uid);
+  const { ics } = buildNewEvent(params, ctx.config.timezone, uid, ctx.config.organizerEmail);
   const href = `${cal.href}${uid}.ics`;
   await withRefresh(ctx, () => ctx.session.client.put(href, ics, { ifNoneMatch: "*" }));
   const stored = await getObject(ctx.session.client, cal, href);
@@ -246,11 +254,12 @@ export async function handleCreate(ctx: Context, rawParams: CreateParams): Promi
 export interface UpdateParams extends WireEventInput {
   uid: string;
   calendar?: string | null;
+  occurrenceStart?: string | null;
   clearRecurrence?: boolean | null;
 }
 
-export async function handleUpdate(ctx: Context, params: UpdateParams): Promise<{ event: Event; verification?: Verification }> {
-  const { uid, calendar, clearRecurrence, ...rest } = params;
+export async function handleUpdate(ctx: Context, params: UpdateParams): Promise<{ event: Event; occurrence?: Event; verification?: Verification }> {
+  const { uid, calendar, occurrenceStart, clearRecurrence, ...rest } = params;
   const input: EventInput = normaliseInput(rest, true);
   if (clearRecurrence) input.recurrence = null;
   const timeFieldsTouched = input.start !== undefined || input.end !== undefined || input.duration !== undefined || input.allDay !== undefined;
@@ -260,34 +269,65 @@ export async function handleUpdate(ctx: Context, params: UpdateParams): Promise<
   for (const k of ["location", "notes", "url"] as const) if (input[k] === "") input[k] = null;
   if (Array.isArray(input.alarms) && input.alarms.length === 0) input.alarms = null;
 
-  const attempt = async (obj: CalendarObject): Promise<CalendarObject> => {
+  const attempt = async (obj: CalendarObject): Promise<{ obj: CalendarObject; occurrence?: Event }> => {
     assertWritable(ctx, obj.calendar);
     const parsed = parseEventDocument(obj.ics);
-    const current = componentToEvent(parsed, { tz: ctx.config.timezone, calendarId: obj.calendar.id, calendarName: obj.calendar.name, readOnly: false, etag: obj.etag });
-    const ics = patchEvent(parsed, current, input, ctx.config.timezone);
-    await ctx.session.client.put(obj.href, ics, obj.etag ? { ifMatch: obj.etag } : {});
-    return obj;
+    const options = { tz: ctx.config.timezone, calendarId: obj.calendar.id, calendarName: obj.calendar.name, readOnly: false, etag: obj.etag };
+    if (occurrenceStart !== undefined && occurrenceStart !== null) {
+      const result = patchOccurrence(parsed, input, occurrenceStart, options, ctx.config.organizerEmail);
+      if (result.changed) await ctx.session.client.put(obj.href, result.ics, obj.etag ? { ifMatch: obj.etag } : {});
+      return { obj, occurrence: result.occurrence };
+    }
+    const current = componentToEvent(parsed, options);
+    const ics = patchEvent(parsed, current, input, ctx.config.timezone, ctx.config.organizerEmail);
+    if (calendarDataChanged(obj.ics, ics)) await ctx.session.client.put(obj.href, ics, obj.etag ? { ifMatch: obj.etag } : {});
+    return { obj };
   };
 
   let obj = await locate(ctx, uid, calendar ?? undefined);
   const before = toEvent(ctx, obj);
+  let occurrence: Event | undefined;
   try {
-    await attempt(obj);
+    ({ occurrence } = await attempt(obj));
   } catch (e) {
     if (e instanceof CalDavError && e.code === "conflict") {
       obj = await getObject(ctx.session.client, obj.calendar, obj.href);
-      await attempt(obj);
+      ({ occurrence } = await attempt(obj));
     } else throw e;
   }
   const stored = await getObject(ctx.session.client, obj.calendar, obj.href);
   const event = toEvent(ctx, stored);
-  return { event, ...(timeFieldsTouched ? { verification: verify(ctx, input, before, event) } : {}) };
+  return { event, ...(occurrence ? { occurrence } : {}), ...(!occurrenceStart && timeFieldsTouched ? { verification: verify(ctx, input, before, event) } : {}) };
 }
 
-export async function handleDelete(ctx: Context, params: { uid: string; calendar?: string | null }): Promise<{ deleted: true; uid: string; calendar: string; title: string }> {
+export async function handleDelete(ctx: Context, params: { uid: string; calendar?: string | null; occurrenceStart?: string | null }): Promise<{ deleted: true; uid: string; calendar: string; title: string; occurrenceStart?: string }> {
   const obj = await locate(ctx, params.uid, params.calendar ?? undefined);
   assertWritable(ctx, obj.calendar);
   const ev = toEvent(ctx, obj);
+  if (params.occurrenceStart !== undefined && params.occurrenceStart !== null) {
+    const cancel = async (current: CalendarObject) => {
+      const parsed = parseEventDocument(current.ics);
+      const result = cancelOccurrence(parsed, params.occurrenceStart!, {
+        tz: ctx.config.timezone,
+        calendarId: current.calendar.id,
+        calendarName: current.calendar.name,
+        readOnly: false,
+        etag: current.etag,
+      });
+      if (result.changed) await ctx.session.client.put(current.href, result.ics, current.etag ? { ifMatch: current.etag } : {});
+      return result.occurrence;
+    };
+    let occurrence: Event;
+    try {
+      occurrence = await cancel(obj);
+    } catch (e) {
+      if (e instanceof CalDavError && e.code === "conflict") {
+        const fresh = await getObject(ctx.session.client, obj.calendar, obj.href);
+        occurrence = await cancel(fresh);
+      } else throw e;
+    }
+    return { deleted: true, uid: ev.uid, calendar: obj.calendar.name, title: occurrence.title || ev.title, occurrenceStart: params.occurrenceStart };
+  }
   try {
     await ctx.session.client.delete(obj.href, obj.etag ? { ifMatch: obj.etag } : {});
   } catch (e) {
