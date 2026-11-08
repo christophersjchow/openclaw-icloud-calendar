@@ -17,6 +17,7 @@ export interface SecretRef {
 export interface RawPluginConfig {
   appleId?: string;
   appPassword?: string | SecretRef;
+  organizerEmail?: string;
   timezone?: string;
   serverUrl?: string;
   calendars?: string[];
@@ -26,6 +27,7 @@ export interface RawPluginConfig {
 export interface ResolvedConfig {
   appleId: string;
   appPassword: string;
+  organizerEmail?: string;
   timezone: string;
   serverUrl: string;
   calendars: string[];
@@ -112,5 +114,6 @@ export function resolveConfig(raw: RawPluginConfig | undefined, env: NodeJS.Proc
   }
 
   const calendars = Array.isArray(raw?.calendars) ? raw!.calendars.filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim()) : [];
-  return { appleId, appPassword, timezone, serverUrl, calendars, readOnly: raw?.readOnly === true };
+  const organizerEmail = (typeof raw?.organizerEmail === "string" && expandEnv(raw.organizerEmail).trim()) || env.ICLOUD_ORGANIZER_EMAIL || undefined;
+  return { appleId, appPassword, organizerEmail: organizerEmail || appleId, timezone, serverUrl, calendars, readOnly: raw?.readOnly !== false };
 }

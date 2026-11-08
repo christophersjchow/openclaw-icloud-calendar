@@ -40,20 +40,31 @@ openclaw plugins inspect openclaw-icloud-calendar --runtime   # must list 6 tool
 openclaw plugins uninstall --force openclaw-icloud-calendar
 ```
 
+This fork defaults to `readOnly: true`, so its normal runtime registers only the
+three read tools. Run the six-tool runtime inspection only in a disposable
+gateway configured with `readOnly: false` and a test-calendar allowlist. Never
+use that write-enabled config on the family gateway; the plugin does not
+enforce the two-parent approval workflow.
+
 Rules learned: no TS-only runtime syntax (parameter properties, enums) — the runtime loader strips types only; never put `required` in `configSchema` (the installer writes an empty entry and the CLI refuses to start); ship `runtimeExtensions: ["./dist/index.js"]` and keep `openclaw` a peerDependency.
 
 ## Publishing
 
 Versions must agree in `package.json`, `marketplace.json`, `openclaw.plugin.json` (CI enforces).
 
-Automated: bump versions, commit, push, then tag:
+Upstream automated publishing: bump versions, commit, push, then tag:
 
 ```bash
 git tag -a v0.2.0 -m "what changed"
 git push origin v0.2.0
 ```
 
-`publish-clawhub.yml` publishes to ClawHub on `v*` tags (needs `CLAWHUB_TOKEN` repo secret). There is no npm channel.
+`publish-clawhub.yml` publishes to ClawHub on `v*` tags only in
+`omarshahine/openclaw-icloud-calendar` (needs `CLAWHUB_TOKEN` repo secret).
+The `christophersjchow` fork is installed by the stack from an exact Git
+commit; its tagged builds do not publish to ClawHub. Do not tag the fork unless
+its publication target and package identity are intentionally changed. There
+is no npm channel.
 
 Manual fallback: `./publish-clawhub.sh --changelog "..."` (needs `clawhub login`).
 

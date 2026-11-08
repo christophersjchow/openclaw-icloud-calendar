@@ -16,10 +16,17 @@ function fakeApi(config: Record<string, unknown>) {
 }
 
 describe("plugin entry", () => {
-  it("registers six tools by default and three in readOnly mode", () => {
+  it("defaults to read-only and registers writes only when explicitly enabled", () => {
     const a = fakeApi({ appleId: "a@b.com", appPassword: "x" });
     (plugin as unknown as { register: (api: unknown) => void }).register(a.api);
     expect(a.tools.map((t) => t.name)).toEqual([
+      "icloud_calendar_list",
+      "icloud_calendar_events",
+      "icloud_calendar_get",
+    ]);
+    const writable = fakeApi({ appleId: "a@b.com", appPassword: "x", readOnly: false });
+    (plugin as unknown as { register: (api: unknown) => void }).register(writable.api);
+    expect(writable.tools.map((t) => t.name)).toEqual([
       "icloud_calendar_list",
       "icloud_calendar_events",
       "icloud_calendar_get",
@@ -27,9 +34,6 @@ describe("plugin entry", () => {
       "icloud_calendar_update",
       "icloud_calendar_delete",
     ]);
-    const b = fakeApi({ appleId: "a@b.com", appPassword: "x", readOnly: true });
-    (plugin as unknown as { register: (api: unknown) => void }).register(b.api);
-    expect(b.tools.map((t) => t.name)).toEqual(["icloud_calendar_list", "icloud_calendar_events", "icloud_calendar_get"]);
   });
 
   it("returns a structured not_configured error instead of throwing", async () => {

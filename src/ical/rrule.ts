@@ -14,6 +14,8 @@ export type Weekday = (typeof WEEKDAYS)[number];
 export interface Recurrence {
   frequency: Frequency;
   interval?: number;
+  /** First day of each recurrence week (RFC default: Monday). */
+  weekStart?: Weekday;
   count?: number;
   /** ISO date or date-time (as supplied / as formatted in configured tz) */
   until?: string;
@@ -27,6 +29,7 @@ export interface Recurrence {
 interface ParsedRule {
   freq: Frequency;
   interval: number;
+  weekStart: Weekday;
   count?: number;
   until?: { kind: "date"; year: number; month: number; day: number } | { kind: "datetime"; date: Date };
   byDay: { ord: number; day: Weekday }[];
@@ -43,7 +46,9 @@ function parseRuleString(raw: string): ParsedRule | undefined {
   }
   const freq = parts.FREQ as Frequency | undefined;
   if (!freq || !["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].includes(freq)) return undefined;
-  const rule: ParsedRule = { freq, interval: parseInt(parts.INTERVAL ?? "1", 10) || 1, byDay: [], byMonthDay: [], other: {} };
+  const weekStart = (parts.WKST ?? "MO").toUpperCase();
+  if (!WEEKDAYS.includes(weekStart as Weekday)) return undefined;
+  const rule: ParsedRule = { freq, interval: parseInt(parts.INTERVAL ?? "1", 10) || 1, weekStart: weekStart as Weekday, byDay: [], byMonthDay: [], other: {} };
   if (parts.COUNT) rule.count = parseInt(parts.COUNT, 10);
   if (parts.UNTIL) {
     const u = parts.UNTIL;
@@ -72,6 +77,7 @@ export function rruleToRecurrence(raw: string, tz: string): Recurrence {
   if (!r) return { frequency: "DAILY", raw };
   const out: Recurrence = { frequency: r.freq };
   if (r.interval !== 1) out.interval = r.interval;
+  if (r.weekStart !== "MO" && raw.toUpperCase().split(";").some((part) => part.startsWith("WKST="))) out.weekStart = r.weekStart;
   if (r.count) out.count = r.count;
   if (r.until) out.until = r.until.kind === "date" ? formatDateOnly(r.until.year, r.until.month, r.until.day) : formatIsoInZone(r.until.date, tz);
   if (r.byDay.length) out.byDay = r.byDay.map((b) => (b.ord ? `${b.ord}${b.day}` : b.day));
@@ -89,6 +95,10 @@ export function recurrenceToRrule(rec: Recurrence, tz: string, allDay: boolean):
   if (rec.interval !== undefined) {
     if (!Number.isInteger(rec.interval) || rec.interval < 1) throw invalidInput("recurrence.interval must be a positive integer");
     if (rec.interval !== 1) parts.push(`INTERVAL=${rec.interval}`);
+  }
+  if (rec.weekStart !== undefined) {
+    if (!WEEKDAYS.includes(rec.weekStart)) throw invalidInput("recurrence.weekStart must be SU, MO, TU, WE, TH, FR, or SA");
+    if (rec.weekStart !== "MO") parts.push(`WKST=${rec.weekStart}`);
   }
   if (rec.count !== undefined && rec.until !== undefined) throw invalidInput("recurrence: specify count or until, not both");
   if (rec.count !== undefined) {
@@ -158,11 +168,13 @@ function* candidates(rule: ParsedRule, start: LocalParts): Generator<{ year: num
     const days = rule.byDay.length ? rule.byDay.map((b) => WEEKDAYS.indexOf(b.day)) : [weekdayOf(s.year, s.month, s.day)];
     // Week start Monday-ish is irrelevant for the set of days; iterate from the start's week.
     const startWd = weekdayOf(s.year, s.month, s.day);
-    const weekAnchor = addDays(s.year, s.month, s.day, -startWd); // Sunday of start week
+    const weekOffset = (startWd - WEEKDAYS.indexOf(rule.weekStart) + 7) % 7;
+    const weekAnchor = addDays(s.year, s.month, s.day, -weekOffset);
     for (let w = 0; ; w += rule.interval) {
       const base = addDays(weekAnchor.year, weekAnchor.month, weekAnchor.day, w * 7);
       for (const wd of [...days].sort((a, b) => a - b)) {
-        const c = addDays(base.year, base.month, base.day, wd);
+        const dayOffset = (wd - WEEKDAYS.indexOf(rule.weekStart) + 7) % 7;
+        const c = addDays(base.year, base.month, base.day, dayOffset);
         if (w === 0 && cmpYmd(c, s) < 0) continue;
         yield c;
       }

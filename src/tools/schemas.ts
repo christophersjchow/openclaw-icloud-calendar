@@ -9,10 +9,19 @@ export const recurrenceSchema = Type.Object(
   {
     frequency: Type.Union([Type.Literal("DAILY"), Type.Literal("WEEKLY"), Type.Literal("MONTHLY"), Type.Literal("YEARLY")]),
     interval: OptNull(Type.Integer({ minimum: 1, description: "Every N periods (default 1)" })),
+    weekStart: OptNull(Type.Union([Type.Literal("SU"), Type.Literal("MO"), Type.Literal("TU"), Type.Literal("WE"), Type.Literal("TH"), Type.Literal("FR"), Type.Literal("SA")], { description: "First day of each recurrence week (default MO)" })),
     count: OptNull(Type.Integer({ minimum: 1, description: "Total number of occurrences (mutually exclusive with until)" })),
     until: OptNull(Type.String({ description: "Last occurrence date/time (ISO 8601). Mutually exclusive with count." })),
     byDay: OptNull(Type.Array(Type.String(), { description: 'Weekdays: ["MO","WE","FR"]. For MONTHLY, ordinal form like "2TU" (second Tuesday) or "-1FR" (last Friday).' })),
     byMonthDay: OptNull(Type.Array(Type.Integer(), { description: "Days of month for MONTHLY, e.g. [1, 15] or [-1] for last day" })),
+  },
+  { additionalProperties: false },
+);
+
+const attendeeSchema = Type.Object(
+  {
+    email: Type.String({ minLength: 3, maxLength: 254, pattern: "^[^\\s@<>]+@[^\\s@<>]+$", description: "Invitee email address" }),
+    name: OptNull(Type.String({ maxLength: 200, description: "Optional display name" })),
   },
   { additionalProperties: false },
 );
@@ -53,6 +62,7 @@ const writableFields = {
 export const createSchema = Type.Object(
   {
     ...writableFields,
+    attendees: OptNull(Type.Array(attendeeSchema, { description: "People to invite by email. Use only when the event should send calendar invitations." })),
     title: Type.String({ description: "Event title" }),
     start: Type.String({ description: `Start. ${DateTimeDesc}` }),
     calendar: Type.String({ description: "Target calendar id or name (required; use icloud_calendar_list)" }),
@@ -64,6 +74,9 @@ export const updateSchema = Type.Object(
   {
     uid: Type.String({ description: "UID of the event to update" }),
     calendar: OptNull(Type.String({ description: "Calendar id or name the event lives in; speeds up lookup" })),
+    occurrenceStart: OptNull(Type.String({ description: "Original start of one recurring occurrence to edit, in the configured timezone or with an ISO offset. Omit to edit the full series." })),
+    addAttendees: OptNull(Type.Array(attendeeSchema, { description: "Add invitees by email; existing invitees are preserved and duplicate additions are ignored." })),
+    removeAttendees: OptNull(Type.Array(Type.String({ minLength: 3, maxLength: 254, description: "Email address of an invitee to remove." }), { description: "Remove these invitees; the calendar server should send cancellation updates." })),
     ...writableFields,
     clearRecurrence: OptNull(Type.Boolean({ description: "Set true to remove recurrence (make the event one-off)" })),
   },
@@ -72,8 +85,9 @@ export const updateSchema = Type.Object(
 
 export const deleteSchema = Type.Object(
   {
-    uid: Type.String({ description: "UID of the event to delete (deletes the whole series for recurring events)" }),
+    uid: Type.String({ description: "UID of the event to delete" }),
     calendar: OptNull(Type.String({ description: "Calendar id or name the event lives in; speeds up lookup" })),
+    occurrenceStart: OptNull(Type.String({ description: "Original start of one recurring occurrence to cancel, in the configured timezone or with an ISO offset. Omit to delete the whole series." })),
   },
   { additionalProperties: false },
 );
