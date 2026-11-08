@@ -166,14 +166,15 @@ function* candidates(rule: ParsedRule, start: LocalParts): Generator<{ year: num
   }
   if (rule.freq === "WEEKLY") {
     const days = rule.byDay.length ? rule.byDay.map((b) => WEEKDAYS.indexOf(b.day)) : [weekdayOf(s.year, s.month, s.day)];
-    // Week start Monday-ish is irrelevant for the set of days; iterate from the start's week.
+    // Anchor interval weeks at WKST, then emit requested weekdays in calendar order.
     const startWd = weekdayOf(s.year, s.month, s.day);
     const weekOffset = (startWd - WEEKDAYS.indexOf(rule.weekStart) + 7) % 7;
     const weekAnchor = addDays(s.year, s.month, s.day, -weekOffset);
     for (let w = 0; ; w += rule.interval) {
       const base = addDays(weekAnchor.year, weekAnchor.month, weekAnchor.day, w * 7);
-      for (const wd of [...days].sort((a, b) => a - b)) {
-        const dayOffset = (wd - WEEKDAYS.indexOf(rule.weekStart) + 7) % 7;
+      const weekStartIndex = WEEKDAYS.indexOf(rule.weekStart);
+      const dayOffsets = days.map((wd) => (wd - weekStartIndex + 7) % 7).sort((a, b) => a - b);
+      for (const dayOffset of dayOffsets) {
         const c = addDays(base.year, base.month, base.day, dayOffset);
         if (w === 0 && cmpYmd(c, s) < 0) continue;
         yield c;

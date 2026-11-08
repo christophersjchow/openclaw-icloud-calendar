@@ -1,6 +1,6 @@
 # openclaw-icloud-calendar
 
-OpenClaw plugin: Apple iCloud Calendar over CalDAV (Apple ID + app-specific password), server-to-server, zero runtime deps for the CalDAV path. Published to ClawHub only as `openclaw-icloud-calendar` (not on npm, by decision).
+OpenClaw plugin: Apple iCloud Calendar over CalDAV (Apple ID + app-specific password), server-to-server, zero runtime deps for the CalDAV path. Upstream publishes the `openclaw-icloud-calendar` ClawHub package; this personal fork is installed from a pinned Git commit and is not published.
 
 ## Project Structure
 
@@ -26,7 +26,7 @@ OpenClaw plugin: Apple iCloud Calendar over CalDAV (Apple ID + app-specific pass
 npm test                 # unit + fake server
 npm run typecheck && npm run build
 npm run plugin:check     # plugin-inspector
-ICLOUD_INTEGRATION=1 ICLOUD_TEST_APPLE_ID=... ICLOUD_TEST_APP_PASSWORD=... ICLOUD_TEST_CALENDAR=Personal npm run test:integration
+ICLOUD_INTEGRATION=1 ICLOUD_TEST_APPLE_ID=... ICLOUD_TEST_APP_PASSWORD=... ICLOUD_TEST_CALENDAR="OpenClaw Test" npm run test:integration
 scripts/check-versions.sh
 ```
 
@@ -66,9 +66,9 @@ commit; its tagged builds do not publish to ClawHub. Do not tag the fork unless
 its publication target and package identity are intentionally changed. There
 is no npm channel.
 
-Manual fallback: `./publish-clawhub.sh --changelog "..."` (needs `clawhub login`).
+Manual fallback for the upstream checkout only: `./publish-clawhub.sh --changelog "..."` (needs `clawhub login`). The script checks the origin URL and refuses to publish from this fork.
 
-Verify: `clawhub package inspect openclaw-icloud-calendar`, `openclaw plugins install clawhub:openclaw-icloud-calendar` then `openclaw plugins inspect openclaw-icloud-calendar --runtime`.
+Verify upstream releases with `clawhub package inspect openclaw-icloud-calendar`. Verify this fork in a disposable write-enabled gateway configured with a test-calendar allowlist.
 
 State: v0.1.0 and v0.1.1 published to ClawHub manually (untagged, community channel); v0.1.2 is the first tag-driven release. Do NOT tag v0.1.0 or v0.1.1 (ClawHub versions are immutable; the tag workflow would try to republish). ClawHub-only by decision (2026-10-18); do not add an npm publish workflow.
 

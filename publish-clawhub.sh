@@ -4,6 +4,11 @@ set -euo pipefail
 # Usage: ./publish-clawhub.sh [--changelog "description of changes"]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ORIGIN_URL=$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)
+if [[ "$ORIGIN_URL" != "https://github.com/omarshahine/openclaw-icloud-calendar.git" && "$ORIGIN_URL" != "git@github.com:omarshahine/openclaw-icloud-calendar.git" ]]; then
+  echo "Refusing to publish: this fork is installed directly from Git and is not published to ClawHub."
+  exit 1
+fi
 VERSION=$(node -p "require('$SCRIPT_DIR/package.json').version")
 COMMIT=$(git -C "$SCRIPT_DIR" rev-parse HEAD)
 
