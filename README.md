@@ -51,9 +51,9 @@ openclaw plugins install git:github.com/christophersjchow/openclaw-icloud-calend
              "appleId": "you@icloud.com",
              "organizerEmail": "you@icloud.com",
              "appPassword": "${ICLOUD_APP_PASSWORD}",
-            "timezone": "Australia/Sydney",
-            "calendars": ["Family"],
-            "readOnly": true
+             "timezone": "Australia/Sydney",
+             "calendars": ["Family"],
+             "readOnly": true
            }
          }
        }
@@ -79,7 +79,7 @@ openclaw plugins install git:github.com/christophersjchow/openclaw-icloud-calend
 | `timezone` | IANA string | host time zone | Used to interpret naive times the agent sends and to format results. |
 | `serverUrl` | string | `https://caldav.icloud.com` | Must be `https`. Any CalDAV server that speaks the same dialect should work, but iCloud is what is tested. |
 | `calendars` | string[] | all | Allowlist of calendar ids or names the agent may see and modify. |
-| `readOnly` | boolean | `true` | Do not register create/update/delete. Set false only after verifying invitation delivery against a separate test calendar. |
+| `readOnly` | boolean | `true` | Do not register create/update/delete. Set false only on a disposable test gateway. The family deployment remains read-only until its approval path exists. |
 
 ## Behavior worth knowing
 
@@ -146,8 +146,15 @@ Live test against a real account (creates and deletes one `[openclaw-test]` even
 
 ```bash
 ICLOUD_INTEGRATION=1 ICLOUD_TEST_APPLE_ID=you@icloud.com ICLOUD_TEST_APP_PASSWORD=<app-specific password> \
-ICLOUD_TEST_CALENDAR=Home npm run test:integration
+ICLOUD_TEST_CALENDAR="OpenClaw Test" npm run test:integration
 ```
+
+Set `ICLOUD_TEST_ATTENDEE_EMAIL` to exercise invite and recurring-instance
+changes. Optionally set `ICLOUD_TEST_REPLACEMENT_ATTENDEE_EMAIL` to exercise
+reassignment. Both must be mailboxes you control. The integration suite refuses
+to run without an explicitly named calendar whose name includes `test`,
+`sandbox` or `staging`; it rejects the Family calendar name. Never point it at
+the Family calendar. It verifies iCloud's stored data, not mailbox delivery.
 
 Design notes live in `docs/superpowers/specs/`.
 
@@ -155,8 +162,10 @@ Design notes live in `docs/superpowers/specs/`.
 
 Use a separate iCloud test calendar and a mailbox you control, not a work calendar integration:
 
-1. Configure a dedicated Apple app-specific password, organizer email and test-calendar allowlist
-   on a disposable Gateway. Both the default and production Gateway are read-only. Set `readOnly: false` only in the disposable test Gateway with the test-calendar allowlist configured.
+1. Configure a dedicated Apple app-specific password, organizer email and
+   test-calendar allowlist on a disposable Gateway. Both the default and
+   production Gateway are read-only. Set `readOnly: false` only in the
+   disposable test Gateway with the test-calendar allowlist configured.
 2. Create a one-off event with a test mailbox as attendee. Confirm an invitation arrives and the
    event appears in that mailbox's calendar after acceptance.
 3. Move the event and confirm the invitee receives one update. Repeat the exact same attendee add
@@ -169,8 +178,8 @@ Use a separate iCloud test calendar and a mailbox you control, not a work calend
 6. Restart the test Gateway and confirm the event/override results are still read from iCloud.
 
 The fake CalDAV tests validate the iCalendar payload and conditional writes; they cannot prove that
-iCloud sends mail or that an external provider accepts it. If iCloud does not deliver requests and
-cancellations in this test, do not enable write tools in the family deployment.
+iCloud sends mail or that an external provider accepts it. Keep the family gateway read-only even
+after the test succeeds until an enforced two-parent approval path is implemented.
 
 ## Current limitations
 

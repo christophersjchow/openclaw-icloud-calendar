@@ -15,6 +15,11 @@ Single account per install. The fork is built into the family OpenClaw image at 
 - Multi-account per agent
 - CLI or MCP surface (OpenClaw plugin only)
 
+This plugin only supplies constrained calendar operations. The family deployment
+must continue to set `readOnly: true` until a separate trusted approval layer
+enforces both parents' consent; this plugin does not implement or bypass that
+approval layer. Setting `readOnly: false` is for the isolated test gateway only.
+
 ## Approach
 
 Hand-rolled zero-runtime-dependency CalDAV client (`fetch` + a small namespace-aware XML parser scoped to DAV multistatus responses). `@sinclair/typebox` is used only for tool parameter schemas (same as openclaw-parcel); `openclaw` is the SDK peer.
@@ -71,7 +76,7 @@ Times: ISO 8601 with offset in the configured `timezone`; all-day as `YYYY-MM-DD
 | `timezone` | IANA string, default host tz | validated with Intl |
 | `serverUrl` | string, default `https://caldav.icloud.com` | must be https unless localhost |
 | `calendars` | string[] | allowlist by id or name; empty = all |
-| `readOnly` | boolean, default false | write tools are not registered |
+| `readOnly` | boolean, default true | write tools are not registered; explicitly set false only on a disposable test gateway until the family approval gate is implemented |
 
 Env fallbacks: `ICLOUD_APPLE_ID`, `ICLOUD_APP_PASSWORD`, `ICLOUD_ORGANIZER_EMAIL`.
 
@@ -92,4 +97,4 @@ Env fallbacks: `ICLOUD_APPLE_ID`, `ICLOUD_APP_PASSWORD`, `ICLOUD_ORGANIZER_EMAIL
 ## Testing
 
 - vitest unit tests: iCal round-trips (all-day, UTC, TZID, floating, RRULE, EXDATE, VALARM, folding, escaping), XML parser on captured multistatus fixtures, tz DST boundaries, client with injected fetch mock (headers, Depth, If-Match, 401/412/404/redirect).
-- Integration (opt-in via `ICLOUD_INTEGRATION=1`, `ICLOUD_TEST_APPLE_ID`, `ICLOUD_TEST_APP_PASSWORD`, `ICLOUD_TEST_CALENDAR`): use a separate test calendar and controlled mailbox to verify invite, update, reassignment/cancellation, and recurring-exception delivery. Mock tests cannot establish that iCloud sent invitation email.
+- Integration (opt-in via `ICLOUD_INTEGRATION=1`, `ICLOUD_TEST_APPLE_ID`, `ICLOUD_TEST_APP_PASSWORD`, and an explicitly named `ICLOUD_TEST_CALENDAR`; optional controlled `ICLOUD_TEST_ATTENDEE_EMAIL` and `ICLOUD_TEST_REPLACEMENT_ATTENDEE_EMAIL` exercise invitation changes and recurring exceptions against iCloud). Confirm actual mailbox delivery manually; the integration test only verifies iCloud's stored calendar data.

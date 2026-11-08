@@ -173,6 +173,21 @@ describe("rrule", () => {
     ]);
   });
 
+  it("emits multiple weekly weekdays in calendar order for a narrow query", () => {
+    const result = expandRrule("FREQ=WEEKLY;BYDAY=MO,SU", {
+      start: { year: 2026, month: 10, day: 5, hour: 9, minute: 0, second: 0 }, // Monday
+      allDay: false,
+      tz: "Australia/Sydney",
+      rangeStart: new Date("2026-10-04T00:00:00Z"),
+      rangeEnd: new Date("2026-10-06T00:00:00Z"),
+      exdates: new Set(),
+      cap: 20,
+    });
+    expect(result.occurrences.map((o) => formatIsoInZone(o as Date, "Australia/Sydney"))).toEqual([
+      "2026-10-05T09:00:00+11:00",
+    ]);
+  });
+
   it("expands monthly ordinal weekday and all-day yearly", () => {
     const m = expandRrule("FREQ=MONTHLY;BYDAY=2TU", {
       start: { year: 2026, month: 8, day: 11, hour: 10, minute: 0, second: 0 },
